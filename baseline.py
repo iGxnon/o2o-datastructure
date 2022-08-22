@@ -6,7 +6,9 @@ Created on Sun Oct 21 16:37:21 2018
 """
 
 """
-这是o2o数据集的 baseline 代码
+这是o2o数据集的 baseline 代码，来自 CSA数据工程基础训练 群文件，用于测试提交和参考
+这是o2o数据集的 baseline 代码，来自 CSA数据工程基础训练 群文件，用于测试提交和参考
+这是o2o数据集的 baseline 代码，来自 CSA数据工程基础训练 群文件，用于测试提交和参考
 """
 
 import pandas as pd
@@ -311,7 +313,7 @@ if __name__ == '__main__':
 
     # 线上训练
     big_train = pd.concat([train, validate], axis=0)
-    big_train.to_csv('./baseline_big_train.csv', index=None)
+    big_train.to_csv('./dataset_baseline/baseline_big_train.csv', index=None)
     result, feat_importance = model_xgb(big_train, test)
     # 保存
-    result.to_csv(r'./output_files/easy.csv', index=False, header=None)
+    result.to_csv(r'./dataset_baseline/output_files/easy.csv', index=False, header=None)
