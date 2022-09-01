@@ -19,6 +19,8 @@ from concurrent.futures import ProcessPoolExecutor
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
 import random
+from autogluon.tabular import TabularDataset, TabularPredictor
+
 
 # 辅助生成基础特征
 # 以 [空格]drop 结尾的是辅助特征，会被删除
@@ -491,23 +493,39 @@ class Stacking:
     """
 
     def __init__(self, save_dir):
+        self.predictor = None
+        self.feat_cols_base = FeaturesBase
+        self.feat_cols_extra = FeaturesBase + FeaturesExtra
         df1 = pd.read_csv(os.path.join(save_dir, 'train/train_set_1_base.csv'),
                           parse_dates=['Date_received', 'Date'])
         df2 = pd.read_csv(os.path.join(save_dir, 'train/train_set_2_base.csv'),
                           parse_dates=['Date_received', 'Date'])
-        self.train_set_base = pd.concat([df1, df2], axis=0, ignore_index=True)
+        self.train_set_base = TabularDataset(pd.concat([df1, df2],
+                                                       axis=0, ignore_index=True)[FeaturesBase + ['label']])
         df3 = pd.read_csv(os.path.join(save_dir, 'train/train_set_1_extra.csv'),
                           parse_dates=['Date_received', 'Date'])
         df4 = pd.read_csv(os.path.join(save_dir, 'train/train_set_2_extra.csv'),
                           parse_dates=['Date_received', 'Date'])
-        self.train_set_extra = pd.concat([df3, df4], axis=0, ignore_index=True)
-        self.test_set = pd.read_csv(os.path.join(save_dir, 'test/test_set.csv'),
-                                    parse_dates=['Date_received'])
-        self.feat_cols_base = FeaturesBase
-        self.feat_cols_extra = FeaturesBase + FeaturesExtra
+        self.train_set_extra = TabularDataset(pd.concat([df3, df4],
+                                                        axis=0,
+                                                        ignore_index=True)[FeaturesBase + FeaturesExtra + ['label']])
+        self.test_set = TabularDataset(pd.read_csv(os.path.join(save_dir, 'test/test_set.csv'),
+                                                   parse_dates=['Date_received']))
+        print(self.train_set_extra.head())
+        print(self.test_set.head())
 
-    def train(self):
-        pass
+    def train_autogluon(self, save_path='agModels', time_limit=None):
+        self.predictor = TabularPredictor(label='label', path=save_path, eval_metric='roc_auc')\
+            .fit(self.train_set_extra, time_limit=time_limit, presets='best_quality')
+
+    def load_autogluon(self, save_path='agModels'):
+        self.predictor = TabularPredictor.load(save_path)
+
+    def pred_autogluon(self):
+        prd = self.predictor.predict_proba(self.test_set[self.feat_cols_extra])
+        prd_df = self.test_set[['User_id', 'Coupon_id', 'Date_received']].copy(deep=False)
+        prd_df = pd.concat([prd_df, prd[1]], axis=1)
+        return prd_df
 
     def valid(self):
         pass
@@ -516,13 +534,16 @@ class Stacking:
         pass
 
 
-def data_process(set_dir, save_dir):
+def data_process(set_dir, save_dir,
+                 off_test='ccf_offline_stage1_test_revised.csv',
+                 off_train='ccf_offline_stage1_train.csv',
+                 on_train='ccf_online_stage1_train.csv'):
     if not os.path.exists(save_dir):
         os.mkdir(save_dir)
         os.mkdir(f'{save_dir}/train')
         os.mkdir(f'{save_dir}/test')
 
-    test, off, on = SetHelper.load_set(set_dir)
+    test, off, on = SetHelper.load_set(set_dir, off_test=off_test, off_train=off_train, on_train=on_train)
 
     print('start preprocess dataset.')
     test = SetHelper.pre_process_offline(test)
@@ -554,4 +575,11 @@ def data_process(set_dir, save_dir):
 
 
 if __name__ == '__main__':
-    data_process('dataset_raw', 'dataset_processed')
+    # data_process('dataset', 'dataset_processed',
+    #              off_train='ccf_offline_stage1_train.zip',
+    #              on_train='ccf_online_stage1_train.zip')
+    stacking = Stacking('dataset_processed')
+    stacking.train_autogluon(time_limit=600)
+    pred = stacking.pred_autogluon()
+    pred.to_csv('./submit_autogluon.csv', index=False, header=False, date_format='%Y%m%d')
+
