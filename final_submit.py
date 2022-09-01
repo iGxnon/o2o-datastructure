@@ -5,7 +5,7 @@
 结合已有的经验和前人的总结，从这600多个特征中筛选出50多个基础特征和xx个额外特征
 其中非传统模型(深度神经网络)训练时使用基础特征，而传统模型则使用 基础特征+额外特征 的方式进行训练
 最后进行复现的文件中，特征工程代码结合之前筛选出的特征，然后更换成了传统方法
-不过避免写重复代码，加了一个可以解析 FeaturesBaseRaw|FeaturesExtra 的函数——SetHelper.parse_features
+不过避免写重复代码，加了一个可以解析 FeaturesBaseRaw|FeaturesExtra 的函数—— SetHelper.parse_features
 
 测试指导：
 将原数据集(ccf_offline_stage1_test_revised.csv, ccf_offline_stage1_train.csv, ccf_online_stage1_train.csv)
@@ -16,6 +16,9 @@
 import os
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
+from sklearn.neighbors import NearestNeighbors
+import numpy as np
+import random
 
 # 辅助生成基础特征
 # 以 [空格]drop 结尾的是辅助特征，会被删除
@@ -28,33 +31,39 @@ from concurrent.futures import ProcessPoolExecutor
 #         agg_function: 表示 groupby 之后的聚合操作，可以是 count(数量)，或者 column-function，例如 Distance-mean，对距离求均值
 #                       当有多组 pivots_columns:agg_function 时会将上一组的输出作为下一组的输入进行新的操作
 FeaturesBaseRaw = [
-    'self:Merchant_id-Coupon_id:count',  # o14
-    'self:Merchant_id:count',  # o13
-    'self:Merchant_id-User_id:count:Merchant_id:count',  # o15
-    'self:User_id-Merchant_id:count',  # o8
-    'self:User_id-Coupon_id:count:User_id:count',  # o12
+    'self:Merchant_id-Coupon_id:count',  # o14  商户-优惠券 维度
+    'self:Merchant_id:count',  # o13  商户 维度
+    'self:Merchant_id-User_id:count:Merchant_id:count',  # o15  商户 维度
+    'self:User_id-Merchant_id:count',  # o8  用户-商户 维度
+    'self:User_id-Coupon_id:count:User_id:count',  # o12  用户 维度
     'self:User_id:Date_received-max drop',
     'self:User_id:Date_received-min drop',
-    'self:User_id:count',  # 领取优惠券数
-    'self-!no_distance:Coupon_id:Distance-mean',
-    'self:Coupon_id-Date_received:count',  # c5
-    'self:Coupon_id-Date_received:count:Coupon_id:count',
-    'self-!no_distance:Coupon_id-Date_received:Distance-mean',  # drop ?
-    'self:Coupon_id:count',
-    'self:Merchant_id-Date_received:count',  # m5
+    'self:User_id:count',  # o1 用户 维度
+    'self-!no_distance:Coupon_id:Distance-mean',  # 优惠券 维度
+    'self-!no_distance:User_id:Distance-mean',  # 用户 维度
+    'self:Coupon_id-Date_received:count',  # c5  优惠券 维度
+    'self:Coupon_id-Date_received:count:Coupon_id:count',  # 优惠券 维度
+    'self-!no_distance:Coupon_id-Date_received:Distance-mean',  # drop ? 优惠券 维度
+    'self:Coupon_id:count',  # 优惠券 维度
+    'self:Merchant_id-Date_received:count',  # m5  商户 维度
+    'self:weekday:count',  # 日期 维度  （KFC 都有疯狂星期四，为什么优惠券就不可以有呢？
+    'self:day:count',  # 日期 维度
+    'self:User_id-weekday:count',  # 用户-日期 维度
+    'self:Merchant_id-weekday:count',  # 商户-日期 维度
 
     # 过去长时间内
-    'off1-!no_distance:Merchant_id:Distance-mean',
+    'off1-!no_distance:Merchant_id:Distance-mean',  # 商户 维度
+    'off1-!no_distance:User_id:Distance-mean',  # 用户 维度
     'off1-normal_consume:User_id:Date-max drop',
     'off1-normal_consume:User_id:Date-min drop',
-    'off1-normal_consume:User_id:count',  # u5-1
-    'off1-!no_consume:Merchant_id:count',  # m0-1
-    'off1:Discount_rate:count',  # c8-1
-    'off1-coupon_consume:Discount_rate:count',  # c9-1
+    'off1-normal_consume:User_id:count',  # u5-1  用户 维度
+    'off1-!no_consume:Merchant_id:count',  # m0-1  商户 维度
+    'off1:Discount_rate:count',  # c8-1  优惠券 维度
+    'off1-coupon_consume:Discount_rate:count',  # c9-1  优惠券 维度
     'off1-coupon_consume:Merchant_id:Date-max drop',
     'off1-coupon_consume:Merchant_id:Date-min drop',
-    'off1-coupon_consume:Merchant_id:count drop',
-    'off1-!no_consume:User_id-Merchant_id:count',  # um6-1
+    'off1-coupon_consume:Merchant_id:count',  # m1  商户 维度
+    'off1-!no_consume:User_id-Merchant_id:count',  # um6-1  用户-商户 特征
 
     # 过去短时间内
     'off2-!no_distance:Merchant_id:Distance-mean',
@@ -66,6 +75,7 @@ FeaturesBaseRaw = [
     'off2-coupon_consume:Discount_rate:count',  # c9-2
     'off2-!no_consume:User_id-Merchant_id:count',  # um6-2
 
+    # 线上行为
     'on:User_id:count',  # on_u1
     'on-is_click:User_id:count',  # on_u2
     'on-normal_consume:User_id:count drop',
@@ -74,12 +84,32 @@ FeaturesBaseRaw = [
     'on-no_consume:User_id:count drop',
 ]
 
+FeaturesExtraRaw = [
+    'self:User_id-Coupon_id:count',  # o2
+    'self:Merchant_id-Coupon_id:count:Merchant_id:count',
+
+    'off1-!no_distance:Merchant_id:count drop',
+    'off1-!no_distance:Merchant_id:Distance-sum drop',
+    'off1-coupon_consume:Merchant_id:discount_rate-mean',  # m8
+    'off1-!normal_consume:Merchant_id:count',  # m3
+    'off1-normal_consume:Merchant_id:count',  # m2-1
+    'off2-normal_consume:Merchant_id:count',  # m2-2
+
+    'on:User_id-Merchant_id:count:User_id:count',
+    'on:User_id-Coupon_id:count:User_id:count',
+]
+
 # 基础的特征，所有基模型共享
 # 最后生成的全部特征
 FeaturesBase = [
     'Distance',
+    'no_distance',
+    'is_full_discount',
+    'discount_x',
+    'discount_y',
+    'discount_rate',
+    'discount_type',
     'day',
-    'month',
     'weekday',
     'f0',  # o7
     'f1',  # u6-1
@@ -91,18 +121,21 @@ FeaturesBase = [
     'f7',  # o17
     'f8',  # o18
     'f9',  # c11-1
-    'f10',  # c11-2
-    'f11',  # m20
-    'f12',  # on_u4
-    'f13',  # on_u5
-    'f14',  # on_u3
-    'f15',  # on_u6
-    'f16',  # on_u7
+    'f10',  # m20
+    'f11',  # on_u4
+    'f12',  # on_u5
+    'f13',  # on_u3
+    'f14',  # on_u6
+    'f15',  # on_u7
     *[i.replace(':', '-') for i in FeaturesBaseRaw if not i.endswith(' drop')]
 ]
 
 # 额外的特征，决策树类模型传统模型使用
-FeaturesExtra = ['']
+FeaturesExtra = [
+    'f16',  # m21
+    'f17',  # m4
+    *[i.replace(':', '-') for i in FeaturesExtraRaw if not i.endswith(' drop')]
+]
 
 no_date = pd.to_datetime(0)
 
@@ -328,7 +361,7 @@ class SetHelper:
 
     @staticmethod
     def data_structure_base(label_set: pd.DataFrame, off_feat_1: pd.DataFrame,
-                            off_feat_2: pd.DataFrame, on_feat: pd.DataFrame, ):
+                            off_feat_2: pd.DataFrame, on_feat: pd.DataFrame):
         """
         基础特征工程
         """
@@ -361,19 +394,37 @@ class SetHelper:
                                           [label_set] * num_workers), axis=0)
 
         label_set['f9'] = label_set['off1-coupon_consume-Discount_rate-count'] / label_set['off1-Discount_rate-count']
-        label_set['f10'] = label_set['off2-coupon_consume-Discount_rate-count'] / label_set['off2-Discount_rate-count']
-        label_set['f11'] = (label_set['off1-coupon_consume-Merchant_id-Date-max'] -
+        label_set['f10'] = (label_set['off1-coupon_consume-Merchant_id-Date-max'] -
                             label_set['off1-coupon_consume-Merchant_id-Date-min']).dt.days / \
                            (label_set['off1-coupon_consume-Merchant_id-count'] - 1)
-        label_set['f12'] = label_set['on-normal_consume-User_id-count'] \
+        label_set['f11'] = label_set['on-normal_consume-User_id-count'] \
                            + label_set['on-fixed_consume-User_id-count'] \
                            + label_set['on-coupon_consume-User_id-count']
-        label_set['f13'] = label_set['f12'] / label_set['on-User_id-count']
-        label_set['f14'] = label_set['on-is_click-User_id-count'] / label_set['on-User_id-count']
-        label_set['f15'] = label_set['on-no_consume-User_id-count'] + label_set['on-coupon_consume-User_id-count']
-        label_set['f16'] = label_set['f15'] / label_set['on-User_id-count']
+        label_set['f12'] = label_set['f11'] / label_set['on-User_id-count']
+        label_set['f13'] = label_set['on-is_click-User_id-count'] / label_set['on-User_id-count']
+        label_set['f14'] = label_set['on-no_consume-User_id-count'] + label_set['on-coupon_consume-User_id-count']
+        label_set['f15'] = label_set['f14'] / label_set['on-User_id-count']
 
         # 移除标记特征
+        label_set.drop(drop_feats, axis=1, inplace=True)
+        print()
+        return label_set.fillna(0)
+
+    @staticmethod
+    def data_structure_extra(label_set: pd.DataFrame, off_feat_1: pd.DataFrame,
+                             off_feat_2: pd.DataFrame, on_feat: pd.DataFrame):
+        """
+        额外特征工程
+        """
+        label_set = label_set.copy(deep=False)
+        label_set, drop_feats = SetHelper.parse_features(FeaturesExtraRaw, label_set, off_feat_1, off_feat_2, on_feat)
+
+        label_set['f16'] = (label_set['off1-!no_distance-Merchant_id-Distance-sum']) / \
+                           (label_set['off1-!no_distance-Merchant_id-count'])
+
+        label_set['f17'] = (label_set['off1-coupon_consume-Merchant_id-count']) / \
+                           (label_set['off1-!normal_consume-Merchant_id-count'])
+
         label_set.drop(drop_feats, axis=1, inplace=True)
         print()
         return label_set.fillna(0)
@@ -391,24 +442,86 @@ class SetHelper:
                        'label'] = 1
         return _label_set
 
+    # 经简单测试发现过采样的效果并不好
     @staticmethod
-    def data_structure_extra(label_set, on_feat, off_feat):
+    def SMOTE(label_set: pd.DataFrame, feat_cols, xx=1.0, n_sampling=0, noise_weight=0.1):
         """
-        额外的特征工程
+        SMOTE 过采样，会直接生成用于训练的数据集
+        :param feat_cols: 特征列
+        :param label_set: 标签集
+        :param n_sampling:  int，过采样的数量
+        :param xx: float，>1，过采样后的倍率，会覆盖 n_sampling
+        :param noise_weight: float，0-1，噪声的权重
         """
-        pass
+        X_min = label_set[feat_cols]
+        y_min = label_set['label']
+        if xx is not None:
+            assert xx > 1.0
+            n_sampling = int(len(X_min) * (xx - 1.0))
+        # 数据集内找五个最近的数据，组成一个数组
+        n_nearests = NearestNeighbors(n_neighbors=5, metric='euclidean', algorithm='kd_tree') \
+            .fit(X_min).kneighbors(X_min)[1]
+        # 全部置0，生成过采样的数据集的数据集
+        X_res = np.zeros((n_sampling, X_min.shape[1]))
+        y_res = np.zeros(n_sampling)
+        for i in range(n_sampling):
+            # 随机选取五个临近点
+            reference = random.randint(0, len(n_nearests) - 1)
+            # 五个点
+            all_point = n_nearests[reference]
+            ser = y_min[y_min.index.isin(all_point)].sum(skipna=True)
+            y_res[i] = 1 if ser > 2 else 0  # 如果大于一半都是正例那就是正例
+            # 随机选一个邻居点，第一个点是中心点，要去掉，所以是 1:
+            neighbour = random.choice(n_nearests[reference, 1:])
+            noise = random.random() * noise_weight  # 随机的噪声
+            # 中心点减去一个随机的邻居点，作为距离
+            gap = (X_min.loc[reference, :] - X_min.loc[neighbour, :])
+            # 根据中心点生成一个新的数据
+            X_res[i] = np.array(X_min.loc[reference, :] + noise * gap)
+        X_res = pd.DataFrame(X_res, columns=X_min.columns)
+        y_res = pd.Series(y_res, name=y_min.name, dtype=int)
+        X_con = pd.concat([X_min, X_res], axis=0, ignore_index=True).astype(X_min.dtypes)
+        y_con = pd.concat([y_min, y_res], axis=0, ignore_index=True).astype(y_min.dtypes)
+        return pd.concat([X_con, y_con], axis=1)
 
 
 class Stacking:
     """
     模型融合部分
     """
-    pass
+
+    def __init__(self, save_dir):
+        df1 = pd.read_csv(os.path.join(save_dir, 'train/train_set_1_base.csv'),
+                          parse_dates=['Date_received', 'Date'])
+        df2 = pd.read_csv(os.path.join(save_dir, 'train/train_set_2_base.csv'),
+                          parse_dates=['Date_received', 'Date'])
+        self.train_set_base = pd.concat([df1, df2], axis=0, ignore_index=True)
+        df3 = pd.read_csv(os.path.join(save_dir, 'train/train_set_1_extra.csv'),
+                          parse_dates=['Date_received', 'Date'])
+        df4 = pd.read_csv(os.path.join(save_dir, 'train/train_set_2_extra.csv'),
+                          parse_dates=['Date_received', 'Date'])
+        self.train_set_extra = pd.concat([df3, df4], axis=0, ignore_index=True)
+        self.test_set = pd.read_csv(os.path.join(save_dir, 'test/test_set.csv'),
+                                    parse_dates=['Date_received'])
+        self.feat_cols_base = FeaturesBase
+        self.feat_cols_extra = FeaturesBase + FeaturesExtra
+
+    def train(self):
+        pass
+
+    def valid(self):
+        pass
+
+    def pred(self, save_to):
+        pass
 
 
 def data_process(set_dir, save_dir):
     if not os.path.exists(save_dir):
         os.mkdir(save_dir)
+        os.mkdir(f'{save_dir}/train')
+        os.mkdir(f'{save_dir}/test')
+
     test, off, on = SetHelper.load_set(set_dir)
 
     print('start preprocess dataset.')
@@ -423,14 +536,22 @@ def data_process(set_dir, save_dir):
 
     train_set1 = SetHelper.data_structure_base(*t1)
     train_set1 = SetHelper.attach_labels(train_set1)
-    train_set1.to_csv(f'./{save_dir}/train_set_1.csv', index=False)
+    train_set1.to_csv(f'./{save_dir}/train/train_set_1_base.csv', index=False)
+    train_set1 = SetHelper.data_structure_extra(train_set1.drop(columns=['label']), *(t1[1:]))
+    train_set1 = SetHelper.attach_labels(train_set1)
+    train_set1.to_csv(f'./{save_dir}/train/train_set_1_extra.csv', index=False)
+
     train_set2 = SetHelper.data_structure_base(*t2)
     train_set2 = SetHelper.attach_labels(train_set2)
-    train_set2.to_csv(f'./{save_dir}/train_set_2.csv', index=False)
+    train_set2.to_csv(f'./{save_dir}/train/train_set_2_base.csv', index=False)
+    train_set2 = SetHelper.data_structure_extra(train_set2.drop(columns=['label']), *(t2[1:]))
+    train_set2 = SetHelper.attach_labels(train_set2)
+    train_set2.to_csv(f'./{save_dir}/train/train_set_2_extra.csv', index=False)
+
     test_set = SetHelper.data_structure_base(*t3)
-    test_set.to_csv(f'./{save_dir}/test_set.csv', index=False)
+    test_set = SetHelper.data_structure_extra(test_set, *(t3[1:]))
+    test_set.to_csv(f'./{save_dir}/test/test_set.csv', index=False)
 
 
 if __name__ == '__main__':
     data_process('dataset_raw', 'dataset_processed')
-
